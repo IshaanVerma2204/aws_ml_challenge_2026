@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg-info
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+.env
+
+# Dataset — ignore all TSVs but keep the placeholder README
+dataset/**/*.tsv
+dataset/train/
+dataset/test/
+
+# Output — ignore generated TSV predictions but keep the placeholder README
+output/*.tsv
+
+# Jupyter Notebooks checkpoints
+.ipynb_checkpoints/
+
+# Model Artifacts (can be large)
+*.pkl
+*.joblib
+*.model
+*.bin
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
