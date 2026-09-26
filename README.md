@@ -48,8 +48,8 @@ After training the XGBoost + Logistic Regression Ensemble on the cross-validatio
 The model was mathematically tuned to maximize the **Macro F0.5 score** (which heavily penalizes False Positives). The optimal threshold was found to be `0.86`, yielding an OOF Macro F0.5 of **0.9486**.
 
 <p align="center">
-  <img src="output/plots/f05_threshold_sweep.png" width="48%">
-  <img src="output/plots/precision_recall_curve.png" width="48%">
+  <img src="output/plots/f05_vs_threshold.png" width="48%">
+  <img src="output/plots/precision_recall_comparison.png" width="48%">
 </p>
 
 ### 2. Feature Importances
