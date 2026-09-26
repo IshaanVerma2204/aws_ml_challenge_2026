@@ -20,25 +20,23 @@ End-to-end ML pipeline for the Business Entity Resolution Challenge. Given busin
 
 | Milestone | Status | Details |
 |-----------|:------:|---------|
-| **Data Ingestion & Cleaning** | ✅ Completed | Fast TSV parsing for Source 1, 2, 3 and Ground Truth with null-handling |
-| **GPU-Accelerated Blocking** | ✅ Completed | Char n-gram TF-IDF + TruncatedSVD (LSA) + PyTorch GPU cosine search |
-| **High-Throughput Feature Extraction** | ✅ Completed | RapidFuzz C++ string distance metrics (Ratio, Partial, Token Sort/Set, WRatio) |
-| **Model Training & Metric Tuning** | ✅ Completed | Grouped-split XGBoost with direct Macro F0.5 threshold sweep |
+| **Data Ingestion & Cleaning** | ✅ Completed | Fast TSV parsing with 20x optimized regex abbreviation expansion |
+| **GPU-Accelerated Blocking** | ✅ Completed | Multi-pass LSA + PyTorch GPU cosine search + FAISS / Semantic Embedding options |
+| **High-Throughput Feature Extraction** | ✅ Completed | 15+ Features including RapidFuzz, Soundex/Metaphone Phonetics, and ZIP parsing |
+| **Model Training & Metric Tuning** | ✅ Completed | Ensemble (XGBoost + Logistic Regression) with Hard Negative Mining & Grouped-split CV |
 | **OOM Prevention & Streaming Inference** | ✅ Completed | 500k-pair chunked streaming pipeline keeping peak RAM < 500 MB |
-| **Full Test Set Execution** | ✅ Completed | Processed all 1,732,544 test Source 1 records vs ~10M candidates |
+| **Full Test Set Execution** | ✅ Completed | Processed all 1,732,544 test Source 1 records vs ~35M candidates |
 | **Official Format Validation** | ✅ **PASSED** | Checked with `utils/validate_submission.py` — 100% compliant |
 
 ### Execution Summary & Metrics
 
+- **Validation Result**: `PASS: All validation checks passed successfully!`
+- **Out-of-Fold (OOF) Macro F0.5 Score**: **0.9486** 🏆
+- **Hard Negatives Mined**: 5,657 pairs identified and re-weighted
 - **Total Test Source 1 Entities**: 1,732,544 records
 - **Total Valid Target Entities (S2 + S3)**: 9,969,589 records
-- **Candidate Pairs Evaluated**: 35,530,683 pairs generated across 7 country blocks
-- **Final Matches Predicted**: 1,028,290 matched pairs (threshold optimized for Macro F0.5)
-- **Validation Result**: `PASS: All validation checks passed successfully!`
-  - Exactly 1 row per test Source 1 entity in both TSVs
-  - Zero duplicate entity IDs
-  - Strict subset guarantee: all `matched_entity_ids` are valid subsets of `candidate_entity_ids`
-  - Valid IDs: all target entities exist in the test pool
+- **Candidate Pairs Evaluated**: 34,650,880 pairs generated across countries and multi-passes
+- **Final Matches Predicted**: 2,287,482 matched pairs (threshold optimized for Macro F0.5)
 
 ---
 

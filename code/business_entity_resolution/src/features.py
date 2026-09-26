@@ -1,7 +1,23 @@
 import pandas as pd
 import numpy as np
 import time
+import re
+import jellyfish
 from rapidfuzz import fuzz
+
+def get_numbers(text):
+    return set(re.findall(r'\d+', str(text)))
+
+def num_overlap(text1, text2):
+    nums1 = get_numbers(text1)
+    nums2 = get_numbers(text2)
+    if not nums1 and not nums2: return 1.0
+    if not nums1 or not nums2: return 0.0
+    return len(nums1.intersection(nums2)) / len(nums1.union(nums2))
+
+def get_zip(text):
+    zips = re.findall(r'\b\d{5,6}\b', str(text))
+    return zips[-1] if zips else ""
 
 def compute_features(df_candidates_flat, df_s1, df_s2, df_s3):
     """
@@ -48,6 +64,15 @@ def compute_features(df_candidates_flat, df_s1, df_s2, df_s3):
     
     cand_source = [2 if str(cid).startswith("S2-") else 3 for cid in cand_ids]
     
+    # 🌟 Brownie Points: Phonetic Normalization & Numeric/ZIP Parsing
+    name_soundex_match = [1 if jellyfish.soundex(n1) == jellyfish.soundex(n2) else 0 for n1, n2 in zip(names1, names2)]
+    name_meta_match = [1 if jellyfish.metaphone(n1) == jellyfish.metaphone(n2) else 0 for n1, n2 in zip(names1, names2)]
+    addr_num_overlap = [num_overlap(a1, a2) for a1, a2 in zip(addrs1, addrs2)]
+    
+    zips1 = [get_zip(a) for a in addrs1]
+    zips2 = [get_zip(a) for a in addrs2]
+    addr_zip_match = [1.0 if z1 and z1 == z2 else (0.0 if z1 and z2 else -1.0) for z1, z2 in zip(zips1, zips2)]
+    
     df_features = pd.DataFrame({
         'source1_entity_id': s1_ids,
         'candidate_entity_id': cand_ids,
@@ -65,6 +90,10 @@ def compute_features(df_candidates_flat, df_s1, df_s2, df_s3):
         'addr_exact': addr_exact,
         'name_len_diff': name_len_diff,
         'addr_len_diff': addr_len_diff,
+        'name_soundex_match': name_soundex_match,
+        'name_meta_match': name_meta_match,
+        'addr_num_overlap': addr_num_overlap,
+        'addr_zip_match': addr_zip_match,
         'cand_source': cand_source
     })
     
@@ -95,7 +124,9 @@ def predict_matches_streamed(model, df_candidates_flat, df_s1, df_s2, df_s3, thr
         'tfidf_sim', 'name_ratio', 'name_partial', 'name_token_sort',
         'name_token_set', 'name_wratio', 'addr_ratio', 'addr_partial',
         'addr_token_sort', 'addr_token_set', 'name_exact', 'addr_exact',
-        'name_len_diff', 'addr_len_diff', 'cand_source'
+        'name_len_diff', 'addr_len_diff', 
+        'name_soundex_match', 'name_meta_match', 'addr_num_overlap', 'addr_zip_match',
+        'cand_source'
     ]
 
     for start_idx in range(0, n_pairs, chunk_size):
@@ -110,6 +141,9 @@ def predict_matches_streamed(model, df_candidates_flat, df_s1, df_s2, df_s3, thr
         names2 = [str(pool_dict[cid]['business_name']).lower() for cid in cand_ids]
         addrs1 = [str(s1_dict[sid]['business_address']).lower() for sid in s1_ids]
         addrs2 = [str(pool_dict[cid]['business_address']).lower() for cid in cand_ids]
+        
+        zips1 = [get_zip(a) for a in addrs1]
+        zips2 = [get_zip(a) for a in addrs2]
 
         X_chunk = pd.DataFrame({
             'tfidf_sim': tfidf_sims.astype(np.float32),
@@ -126,6 +160,10 @@ def predict_matches_streamed(model, df_candidates_flat, df_s1, df_s2, df_s3, thr
             'addr_exact': np.array([1 if a1 == a2 else 0 for a1, a2 in zip(addrs1, addrs2)], dtype=np.int8),
             'name_len_diff': np.array([abs(len(n1) - len(n2)) for n1, n2 in zip(names1, names2)], dtype=np.int16),
             'addr_len_diff': np.array([abs(len(a1) - len(a2)) for a1, a2 in zip(addrs1, addrs2)], dtype=np.int16),
+            'name_soundex_match': np.array([1 if jellyfish.soundex(n1) == jellyfish.soundex(n2) else 0 for n1, n2 in zip(names1, names2)], dtype=np.int8),
+            'name_meta_match': np.array([1 if jellyfish.metaphone(n1) == jellyfish.metaphone(n2) else 0 for n1, n2 in zip(names1, names2)], dtype=np.int8),
+            'addr_num_overlap': np.array([num_overlap(a1, a2) for a1, a2 in zip(addrs1, addrs2)], dtype=np.float32),
+            'addr_zip_match': np.array([1.0 if z1 and z1 == z2 else (0.0 if z1 and z2 else -1.0) for z1, z2 in zip(zips1, zips2)], dtype=np.float32),
             'cand_source': np.array([2 if str(cid).startswith("S2-") else 3 for cid in cand_ids], dtype=np.int8)
         }, columns=feature_cols)
 

@@ -31,6 +31,18 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import TruncatedSVD
 from sklearn.preprocessing import normalize
 
+try:
+    import faiss
+    FAISS_AVAILABLE = True
+except ImportError:
+    FAISS_AVAILABLE = False
+    
+try:
+    from sentence_transformers import SentenceTransformer
+    SENTENCE_TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    SENTENCE_TRANSFORMERS_AVAILABLE = False
+
 
 # ---------------------------------------------------------------------------#
 #  GPU / device setup                                                        #
@@ -157,6 +169,36 @@ def _topk_search_gpu(s1_lsa, pool_lsa, top_k, min_sim, s1_gpu_batch,
     torch.cuda.empty_cache()
     return candidates
 
+def _topk_search_faiss(s1_embs, pool_embs, top_k, min_sim, country, pool_ids, s1_ids):
+    """
+    FAISS approximate nearest-neighbor search.
+    Requires faiss-gpu or faiss-cpu to be installed.
+    """
+    print(f"  [{country}] FAISS search: Indexing {len(pool_embs):,} items...", flush=True)
+    d = pool_embs.shape[1]
+    
+    # Use inner product (cosine similarity since vectors are normalized)
+    index = faiss.IndexFlatIP(d)
+    
+    if faiss.get_num_gpus() > 0:
+        res = faiss.StandardGpuResources()
+        index = faiss.index_cpu_to_gpu(res, 0, index)
+        
+    index.add(pool_embs)
+    print(f"  [{country}] FAISS search: Querying {len(s1_embs):,} items...", flush=True)
+    D, I = index.search(s1_embs, top_k)
+    
+    candidates = []
+    for i in range(len(s1_embs)):
+        for j in range(top_k):
+            if D[i, j] >= min_sim and I[i, j] >= 0:
+                candidates.append({
+                    'source1_entity_id':   s1_ids[i],
+                    'candidate_entity_id': pool_ids[I[i, j]],
+                    'tfidf_sim':           float(D[i, j])
+                })
+    return candidates
+
 
 def _topk_search_cpu(s1_lsa, pool_lsa, top_k, min_sim,
                      s1_cpu_batch, pool_chunk_size, country, pool_ids, s1_ids):
@@ -235,31 +277,95 @@ def _topk_search_cpu(s1_lsa, pool_lsa, top_k, min_sim,
 #  Main blocking function                                                    #
 # ---------------------------------------------------------------------------#
 
+def _run_blocking_pass(s1_c, pool_c, country, pass_name, top_k, min_sim, n_components, 
+                       use_gpu, device, torch_mod, s1_gpu_batch, s1_cpu_batch, pool_chunk_size,
+                       use_semantic=False):
+    import time
+    t0 = time.time()
+    
+    if use_semantic and SENTENCE_TRANSFORMERS_AVAILABLE:
+        print(f"    [{pass_name}] Embedding {len(pool_c):,} pool items with all-MiniLM-L6-v2...", flush=True)
+        model = SentenceTransformer('all-MiniLM-L6-v2', device='cuda' if use_gpu else 'cpu')
+        pool_lsa = model.encode(pool_c['clean_text'].tolist(), batch_size=256, show_progress_bar=False, normalize_embeddings=True)
+        print(f"    [{pass_name}] Embedding {len(s1_c):,} S1 items...", flush=True)
+        s1_lsa = model.encode(s1_c['clean_text'].tolist(), batch_size=256, show_progress_bar=False, normalize_embeddings=True)
+        pool_lsa = pool_lsa.astype(np.float32)
+        s1_lsa = s1_lsa.astype(np.float32)
+    else:
+        sample_size = min(300_000, len(pool_c))
+        sample_text = pool_c['clean_text'].sample(n=sample_size, random_state=42)
+        vectorizer  = TfidfVectorizer(
+            analyzer='char_wb', ngram_range=(3, 4), min_df=10, max_df=0.3,
+            max_features=10_000, sublinear_tf=True, dtype=np.float32
+        )
+        vectorizer.fit(sample_text)
+        print(f"    [{pass_name}] TF-IDF vocab: {len(vectorizer.vocabulary_)}", flush=True)
+
+        t_svd = time.time()
+        tfidf_sample = vectorizer.transform(sample_text).astype(np.float32)
+        svd = TruncatedSVD(n_components=n_components, random_state=42, n_iter=5)
+        svd.fit(tfidf_sample)
+        del tfidf_sample
+        print(f"    [{pass_name}] SVD done in {time.time()-t_svd:.1f}s  "
+              f"(var: {svd.explained_variance_ratio_.sum()*100:.1f}%)", flush=True)
+
+        t_pool  = time.time()
+        pool_lsa = _build_pool_lsa(vectorizer, svd, pool_c['clean_text'],
+                                   prefix=f'[{country}-{pass_name}]')
+        print(f"    [{pass_name}] Pool LSA done in {time.time()-t_pool:.1f}s.", flush=True)
+
+        tfidf_s1 = vectorizer.transform(s1_c['clean_text']).astype(np.float32)
+        s1_lsa   = normalize(svd.transform(tfidf_s1).astype(np.float32), norm='l2')
+        del tfidf_s1
+
+    pool_ids = pool_c['entity_id'].values
+    s1_ids   = s1_c['entity_id'].values
+
+    if FAISS_AVAILABLE:
+        cands = _topk_search_faiss(s1_lsa, pool_lsa, top_k, min_sim, country, pool_ids, s1_ids)
+    elif use_gpu:
+        pool_gb   = pool_lsa.nbytes / 1e9
+        vram_free = torch_mod.cuda.get_device_properties(0).total_memory / 1e9 - 0.5
+        if pool_gb < vram_free * 0.8:
+            cands = _topk_search_gpu(
+                s1_lsa, pool_lsa, top_k, min_sim,
+                s1_gpu_batch, device, torch_mod,
+                country, pool_ids, s1_ids
+            )
+        else:
+            pool_chunk_gpu = max(500_000, int(vram_free * 0.4 * 1e9 / (n_components * 4)))
+            cands = []
+            n_pool = len(pool_ids)
+            for p_start in range(0, n_pool, pool_chunk_gpu):
+                p_end   = min(p_start + pool_chunk_gpu, n_pool)
+                p_chunk = pool_lsa[p_start:p_end]
+                chunk_cands = _topk_search_gpu(
+                    s1_lsa, p_chunk, top_k, min_sim,
+                    s1_gpu_batch, device, torch_mod,
+                    country, pool_ids[p_start:p_end], s1_ids
+                )
+                cands.extend(chunk_cands)
+    else:
+        cands = _topk_search_cpu(
+            s1_lsa, pool_lsa, top_k, min_sim,
+            s1_cpu_batch, pool_chunk_size,
+            country, pool_ids, s1_ids
+        )
+
+    del pool_lsa, s1_lsa
+    print(f"    [{pass_name}] Pass done in {time.time()-t0:.1f}s.  "
+          f"Candidates: {len(cands):,}", flush=True)
+    return cands
+
 def generate_candidates(df_s1, df_s2, df_s3, top_k=20, min_sim=0.15,
                         n_components=128,
                         s1_gpu_batch=5_000,
                         s1_cpu_batch=3_000,
-                        pool_chunk_size=2_000):
-    """
-    Generate top-k cosine-LSA candidates per country.
-
-    GPU path  (CUDA available):
-      pool_lsa loaded to GPU once. S1 processed in batches of s1_gpu_batch.
-      sim = (batch, 128) @ (128, n_pool) -> topk on GPU.
-      RTX 4050: ~1-2 min per country for 663K S1 x 3.8M pool.
-
-    CPU path  (no CUDA):
-      Nested S1-batch x pool-chunk matmul, ~200 MB per iteration.
-      Slower but memory-safe for any system.
-    """
-    import scipy.sparse as sp
-
+                        pool_chunk_size=2_000,
+                        use_semantic=False):
     df_pool = pd.concat([df_s2, df_s3], ignore_index=True)
     df_s1   = df_s1.copy()
     df_pool = df_pool.copy()
-
-    df_s1['clean_text']   = (df_s1['business_name']   + ' ' + df_s1['business_address']).str.lower()
-    df_pool['clean_text'] = (df_pool['business_name'] + ' ' + df_pool['business_address']).str.lower()
 
     device, torch_mod = _get_device()
     use_gpu = device is not None
@@ -267,7 +373,7 @@ def generate_candidates(df_s1, df_s2, df_s3, top_k=20, min_sim=0.15,
     countries      = df_s1['country'].unique()
     all_candidates = []
 
-    print(f"Starting blocking across {len(countries)} countries: {list(countries)}...", flush=True)
+    print(f"Starting multi-pass blocking across {len(countries)} countries: {list(countries)}...", flush=True)
     t0_all = time.time()
 
     for country in countries:
@@ -281,97 +387,40 @@ def generate_candidates(df_s1, df_s2, df_s3, top_k=20, min_sim=0.15,
         print(f"\nBlocking for country '{country}' "
               f"(S1: {len(s1_c):,}, Pool: {len(pool_c):,})...", flush=True)
         t0 = time.time()
-
-        # ------------------------------------------------------------------ #
-        # 1. TF-IDF                                                          #
-        # ------------------------------------------------------------------ #
-        sample_size = min(300_000, len(pool_c))
-        sample_text = pool_c['clean_text'].sample(n=sample_size, random_state=42)
-        vectorizer  = TfidfVectorizer(
-            analyzer='char_wb', ngram_range=(3, 4), min_df=10, max_df=0.3,
-            max_features=10_000, sublinear_tf=True, dtype=np.float32
-        )
-        vectorizer.fit(sample_text)
-        print(f"  TF-IDF vocab: {len(vectorizer.vocabulary_)}", flush=True)
-
-        # ------------------------------------------------------------------ #
-        # 2. SVD                                                             #
-        # ------------------------------------------------------------------ #
-        t_svd = time.time()
-        tfidf_sample = vectorizer.transform(sample_text).astype(np.float32)
-        svd = TruncatedSVD(n_components=n_components, random_state=42, n_iter=5)
-        svd.fit(tfidf_sample)
-        del tfidf_sample
-        print(f"  SVD done in {time.time()-t_svd:.1f}s  "
-              f"(var: {svd.explained_variance_ratio_.sum()*100:.1f}%)", flush=True)
-
-        # ------------------------------------------------------------------ #
-        # 3. Pool LSA  (chunked, never stores full sparse TF-IDF)            #
-        # ------------------------------------------------------------------ #
-        print(f"  Building pool LSA ({len(pool_c):,} rows)...", flush=True)
-        t_pool  = time.time()
-        pool_lsa = _build_pool_lsa(vectorizer, svd, pool_c['clean_text'],
-                                   prefix=f'[{country}]')
-        print(f"  Pool LSA done in {time.time()-t_pool:.1f}s.  "
-              f"{pool_lsa.shape}  ({pool_lsa.nbytes/1e9:.2f} GB)", flush=True)
-
-        # ------------------------------------------------------------------ #
-        # 4. S1 LSA                                                          #
-        # ------------------------------------------------------------------ #
-        tfidf_s1 = vectorizer.transform(s1_c['clean_text']).astype(np.float32)
-        s1_lsa   = normalize(svd.transform(tfidf_s1).astype(np.float32), norm='l2')
-        del tfidf_s1
-        print(f"  S1 LSA done.  {s1_lsa.shape}", flush=True)
-
-        pool_ids = pool_c['entity_id'].values
-        s1_ids   = s1_c['entity_id'].values
-
-        # ------------------------------------------------------------------ #
-        # 5. Top-k search                                                    #
-        # ------------------------------------------------------------------ #
-        if use_gpu:
-            # Check VRAM: need pool_lsa + s1_batch + sim
-            pool_gb   = pool_lsa.nbytes / 1e9
-            vram_free = torch_mod.cuda.get_device_properties(0).total_memory / 1e9 - 0.5
-            if pool_gb < vram_free * 0.8:
-                # Pool fits in VRAM
-                cands = _topk_search_gpu(
-                    s1_lsa, pool_lsa, top_k, min_sim,
-                    s1_gpu_batch, device, torch_mod,
-                    country, pool_ids, s1_ids
-                )
-            else:
-                # Pool too large for VRAM — chunk pool on GPU
-                print(f"  Pool ({pool_gb:.2f} GB) > VRAM budget ({vram_free*0.8:.2f} GB). "
-                      f"Chunking pool across GPU calls...", flush=True)
-                # Increase s1_gpu_batch to scan pool in chunks
-                pool_chunk_gpu = max(500_000, int(vram_free * 0.4 * 1e9 / (n_components * 4)))
-                cands = []
-                n_pool = len(pool_ids)
-                t_gpu  = time.time()
-                for p_start in range(0, n_pool, pool_chunk_gpu):
-                    p_end   = min(p_start + pool_chunk_gpu, n_pool)
-                    p_chunk = pool_lsa[p_start:p_end]
-                    chunk_cands = _topk_search_gpu(
-                        s1_lsa, p_chunk, top_k, min_sim,
-                        s1_gpu_batch, device, torch_mod,
-                        country, pool_ids[p_start:p_end], s1_ids
-                    )
-                    cands.extend(chunk_cands)
-                    print(f"  Pool chunk {p_end:,}/{n_pool:,} done "
-                          f"in {time.time()-t_gpu:.0f}s", flush=True)
-        else:
-            cands = _topk_search_cpu(
-                s1_lsa, pool_lsa, top_k, min_sim,
-                s1_cpu_batch, pool_chunk_size,
-                country, pool_ids, s1_ids
+        
+        country_cands = []
+        
+        passes = [
+            ("name_only", s1_c['business_name'].str.lower(), pool_c['business_name'].str.lower()),
+            ("address_only", s1_c['business_address'].str.lower(), pool_c['business_address'].str.lower()),
+            ("combined", (s1_c['business_name'] + ' ' + s1_c['business_address']).str.lower(), 
+                         (pool_c['business_name'] + ' ' + pool_c['business_address']).str.lower())
+        ]
+        
+        for pass_name, s1_text, pool_text in passes:
+            print(f"  --- Pass: {pass_name} ---", flush=True)
+            s1_c['clean_text'] = s1_text
+            pool_c['clean_text'] = pool_text
+            
+            # Use smaller top_k for individual passes to control candidate explosion
+            pass_top_k = top_k if pass_name == "combined" else max(1, top_k // 2)
+            
+            pass_cands = _run_blocking_pass(
+                s1_c, pool_c, country, pass_name, pass_top_k, min_sim, n_components,
+                use_gpu, device, torch_mod, s1_gpu_batch, s1_cpu_batch, pool_chunk_size,
+                use_semantic=use_semantic
             )
-
-        del pool_lsa, s1_lsa
-
-        print(f"  Country '{country}' done in {time.time()-t0:.1f}s.  "
-              f"Candidates: {len(cands):,}", flush=True)
-        all_candidates.extend(cands)
+            country_cands.extend(pass_cands)
+            
+        # Deduplicate candidates for this country
+        df_cands = pd.DataFrame(country_cands)
+        if not df_cands.empty:
+            df_cands = df_cands.sort_values('tfidf_sim', ascending=False)
+            df_cands = df_cands.drop_duplicates(subset=['source1_entity_id', 'candidate_entity_id'], keep='first')
+            all_candidates.extend(df_cands.to_dict('records'))
+            print(f"  Country '{country}' total deduplicated candidates: {len(df_cands):,}", flush=True)
+        
+        print(f"  Country '{country}' done in {time.time()-t0:.1f}s.", flush=True)
 
     print(f"\nTotal blocking done in {time.time()-t0_all:.1f}s.  "
           f"Total: {len(all_candidates):,}", flush=True)

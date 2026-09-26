@@ -38,6 +38,7 @@ output/*.feather
 *.joblib
 *.model
 *.bin
+*.zip
 
 # IDE
 .vscode/

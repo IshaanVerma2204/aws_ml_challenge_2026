@@ -3,6 +3,8 @@ import os
 import sys
 import time
 import pickle
+import json
+import pandas as pd
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -36,14 +38,40 @@ def main():
     parser = argparse.ArgumentParser(description="End-to-End Business Entity Resolution Pipeline")
     parser.add_argument("--data_dir",          type=str,   default="dataset")
     parser.add_argument("--output_dir",        type=str,   default="output")
-    parser.add_argument("--top_k",             type=int,   default=20)
-    parser.add_argument("--min_sim",           type=float, default=0.15)
-    parser.add_argument("--train_sample_size", type=int,   default=50000)
+    parser.add_argument("--top_k",             type=int,   default=None, help="Overrides config.yaml if set")
+    parser.add_argument("--min_sim",           type=float, default=None, help="Overrides config.yaml if set")
+    parser.add_argument("--train_sample_size", type=int,   default=None, help="Overrides config.yaml if set")
+    parser.add_argument("--semantic",          action="store_true",
+                        help="Use SentenceTransformers instead of TF-IDF for blocking")
     parser.add_argument("--skip_training",     action="store_true",
                         help="Skip Stages 1-4 and load saved model checkpoint instead")
     parser.add_argument("--force_retrain",     action="store_true",
                         help="Force re-training even if checkpoint exists")
     args = parser.parse_args()
+    
+    # Load Config YAML
+    config_path = os.path.join(os.path.dirname(__file__), "config.yaml")
+    config = {}
+    try:
+        import yaml
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+            print(f"Loaded configuration from {config_path}")
+    except ImportError:
+        print("PyYAML not installed. Using default hyperparams.", flush=True)
+        
+    top_k = args.top_k if args.top_k is not None else config.get('blocking', {}).get('top_k', 20)
+    min_sim = args.min_sim if args.min_sim is not None else config.get('blocking', {}).get('min_sim', 0.15)
+    train_sample_size = args.train_sample_size if args.train_sample_size is not None else config.get('pipeline', {}).get('train_sample_size', 50000)
+    use_semantic = args.semantic or config.get('blocking', {}).get('use_semantic', False)
+    
+    run_summary = {
+        "timestamp": time.time(),
+        "args": vars(args),
+        "config": config,
+        "metrics": {}
+    }
 
     t_start = time.time()
     print("=" * 70, flush=True)
@@ -72,16 +100,46 @@ def main():
         print("\n--- STAGE 1: LOAD TRAINING DATA ---", flush=True)
         df_s1_train, df_s2_train, df_s3_train, df_gt = load_data(args.data_dir, split="train")
 
-        if args.train_sample_size > 0 and len(df_s1_train) > args.train_sample_size:
-            print(f"Sampling {args.train_sample_size} Source 1 entities for training...", flush=True)
-            df_s1_train = df_s1_train.sample(n=args.train_sample_size, random_state=42).reset_index(drop=True)
+        if train_sample_size is not None and train_sample_size > 0 and len(df_s1_train) > train_sample_size:
+            print(f"Sampling {train_sample_size} Source 1 entities for training...", flush=True)
+            df_s1_train = df_s1_train.sample(n=train_sample_size, random_state=42).reset_index(drop=True)
 
         # 2. Blocking (Train)
         print("\n--- STAGE 2: BLOCKING / CANDIDATE GENERATION (TRAIN) ---", flush=True)
-        df_cand_train = generate_candidates(
-            df_s1_train, df_s2_train, df_s3_train,
-            top_k=args.top_k, min_sim=args.min_sim
-        )
+        cand_train_cache_path = os.path.join(args.output_dir, "cache_candidates_train.feather")
+        if os.path.exists(cand_train_cache_path):
+            print(f"  [Cache] Loading cached train candidates from {cand_train_cache_path}...", flush=True)
+            df_cand_train = pd.read_feather(cand_train_cache_path)
+        else:
+            df_cand_train = generate_candidates(
+                df_s1_train, df_s2_train, df_s3_train,
+                top_k=top_k, min_sim=min_sim,
+                use_semantic=use_semantic
+            )
+            try:
+                os.makedirs(args.output_dir, exist_ok=True)
+                df_cand_train.to_feather(cand_train_cache_path)
+                print(f"  [Cache] Saved train candidate pairs to {cand_train_cache_path}", flush=True)
+            except Exception as e:
+                print(f"  [Cache warning] Could not save train cache: {e}", flush=True)
+
+        print("    Injecting missed ground truth positive pairs into training candidates...", flush=True)
+        valid_s1_train = set(df_s1_train['entity_id'].values)
+        gt_pairs_list = []
+        for _, row in df_gt.iterrows():
+            s1 = row['source1_entity_id']
+            if s1 in valid_s1_train:
+                matches = str(row['matched_entity_ids']).split(',')
+                for m in matches:
+                    m = m.strip()
+                    if m:
+                        gt_pairs_list.append({'source1_entity_id': s1, 'candidate_entity_id': m, 'tfidf_sim': 1.0})
+        
+        df_gt_flat = pd.DataFrame(gt_pairs_list)
+        if not df_gt_flat.empty:
+            df_cand_train = pd.concat([df_cand_train, df_gt_flat], ignore_index=True)
+            df_cand_train = df_cand_train.drop_duplicates(subset=['source1_entity_id', 'candidate_entity_id'])
+        print(f"    Total candidates after GT injection: {len(df_cand_train):,}", flush=True)
 
         # 3. Features (Train)
         print("\n--- STAGE 3: FEATURE ENGINEERING (TRAIN) ---", flush=True)
@@ -112,7 +170,8 @@ def main():
     else:
         df_cand_test = generate_candidates(
             df_s1_test, df_s2_test, df_s3_test,
-            top_k=args.top_k, min_sim=args.min_sim
+            top_k=top_k, min_sim=min_sim,
+            use_semantic=use_semantic
         )
         try:
             df_cand_test.to_feather(cand_cache_path)
@@ -141,9 +200,20 @@ def main():
     print(f"  Saved {match_out_path} ({len(matching_results_df):,} rows)", flush=True)
 
     print("\n" + "=" * 70, flush=True)
-    print(f"PIPELINE DONE IN {time.time() - t_start:.2f}s!", flush=True)
+    total_time = time.time() - t_start
+    print(f"PIPELINE DONE IN {total_time:.2f}s!", flush=True)
     print("=" * 70, flush=True)
-
+    
+    # Structured logging
+    run_summary["metrics"]["total_time_seconds"] = total_time
+    run_summary["metrics"]["test_matches_predicted"] = len(matching_results_df)
+    if 'threshold' in locals() and threshold is not None:
+        run_summary["metrics"]["optimal_threshold"] = float(threshold)
+        
+    summary_path = os.path.join(args.output_dir, "run_summary.json")
+    with open(summary_path, 'w') as f:
+        json.dump(run_summary, f, indent=4)
+    print(f"Run summary saved to {summary_path}")
 
 if __name__ == "__main__":
     main()
