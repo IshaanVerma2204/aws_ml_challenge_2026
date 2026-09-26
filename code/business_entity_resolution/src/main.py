@@ -81,13 +81,14 @@ def main():
     # ------------------------------------------------------------------ #
     # Decide whether to train or load checkpoint                         #
     # ------------------------------------------------------------------ #
-    checkpoint_exists = os.path.exists(CHECKPOINT_FILE)
+    checkpoint_file = os.path.join(args.output_dir, "checkpoint_trained_model.pkl")
+    checkpoint_exists = os.path.exists(checkpoint_file)
     do_train = (not args.skip_training) and (args.force_retrain or not checkpoint_exists)
 
     if not do_train and checkpoint_exists:
-        print(f"\n[*] Checkpoint found at '{CHECKPOINT_FILE}'.", flush=True)
+        print(f"\n[*] Checkpoint found at '{checkpoint_file}'.", flush=True)
         print("    Skipping training (Stages 1-4). Loading saved model...", flush=True)
-        model, threshold = load_checkpoint()
+        model, threshold = load_checkpoint(checkpoint_file)
         if model is None:
             print("    ERROR: Could not load checkpoint. Re-training...", flush=True)
             do_train = True
@@ -99,10 +100,6 @@ def main():
         # 1. Load Training Data
         print("\n--- STAGE 1: LOAD TRAINING DATA ---", flush=True)
         df_s1_train, df_s2_train, df_s3_train, df_gt = load_data(args.data_dir, split="train")
-
-        if train_sample_size is not None and train_sample_size > 0 and len(df_s1_train) > train_sample_size:
-            print(f"Sampling {train_sample_size} Source 1 entities for training...", flush=True)
-            df_s1_train = df_s1_train.sample(n=train_sample_size, random_state=42).reset_index(drop=True)
 
         # 2. Blocking (Train)
         print("\n--- STAGE 2: BLOCKING / CANDIDATE GENERATION (TRAIN) ---", flush=True)
@@ -151,7 +148,7 @@ def main():
         model, threshold = train_model(df_train, df_gt)
 
         # Save checkpoint so next run skips training
-        save_checkpoint(model, threshold)
+        save_checkpoint(model, threshold, checkpoint_file)
 
     # ------------------------------------------------------------------ #
     # STAGES 5-9: Test inference                                         #

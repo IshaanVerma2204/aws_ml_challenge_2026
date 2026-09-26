@@ -40,6 +40,35 @@ End-to-end ML pipeline for the Business Entity Resolution Challenge. Given busin
 
 ---
 
+## Model Evaluation & Performance
+
+After training the XGBoost + Logistic Regression Ensemble on the cross-validation dataset, the following charts were generated on a balanced evaluation sample of 264,000 candidate pairs (114k positive, 150k negative).
+
+### 1. F0.5 Threshold Sweep & Precision-Recall Curve
+The model was mathematically tuned to maximize the **Macro F0.5 score** (which heavily penalizes False Positives). The optimal threshold was found to be `0.86`, yielding an OOF Macro F0.5 of **0.9486**.
+
+<p align="center">
+  <img src="output/plots/f05_threshold_sweep.png" width="48%">
+  <img src="output/plots/precision_recall_curve.png" width="48%">
+</p>
+
+### 2. Feature Importances
+The most critical features that drive the predictions are visualised below. Note the strong impact of RapidFuzz `WRatio`, phonetic Soundex match, and precise Address components.
+
+<p align="center">
+  <img src="output/plots/feature_importance.png" width="75%">
+</p>
+
+### 3. Confusion Matrix & Class-wise Metrics
+At our strict threshold of 0.86, the model demonstrates immense precision, successfully filtering out nearly all negatives while preserving high recall on the positive pairs.
+
+<p align="center">
+  <img src="output/plots/confusion_matrix.png" width="48%">
+  <img src="output/plots/class_wise_metrics.png" width="48%">
+</p>
+
+---
+
 ## Project Structure
 
 ```
