@@ -61,10 +61,13 @@ def main():
     except ImportError:
         print("PyYAML not installed. Using default hyperparams.", flush=True)
         
-    top_k = args.top_k if args.top_k is not None else config.get('blocking', {}).get('top_k', 20)
-    min_sim = args.min_sim if args.min_sim is not None else config.get('blocking', {}).get('min_sim', 0.15)
-    train_sample_size = args.train_sample_size if args.train_sample_size is not None else config.get('pipeline', {}).get('train_sample_size', 50000)
+    top_k = args.top_k if args.top_k is not None else config.get('blocking', {}).get('top_k', 50)
+    min_sim = args.min_sim if args.min_sim is not None else config.get('blocking', {}).get('min_sim', 0.05)
+    # train_sample_size: None means train on ALL data (no cap)
+    cfg_sample = config.get('pipeline', {}).get('train_sample_size', None)
+    train_sample_size = args.train_sample_size if args.train_sample_size is not None else cfg_sample
     use_semantic = args.semantic or config.get('blocking', {}).get('use_semantic', False)
+
     
     run_summary = {
         "timestamp": time.time(),
@@ -128,7 +131,19 @@ def main():
         # 4. Train Model
         print("\n--- STAGE 4: MODEL TRAINING & MACRO F0.5 THRESHOLD TUNING ---", flush=True)
         df_train = prepare_training_data(df_feat_train, df_gt)
+
+        # Optional: subsample training data if train_sample_size is set in config
+        if train_sample_size is not None:
+            if len(df_train) > train_sample_size:
+                print(f"  Subsampling training data: {len(df_train):,} → {train_sample_size:,}", flush=True)
+                df_train = df_train.sample(n=train_sample_size, random_state=42).reset_index(drop=True)
+            else:
+                print(f"  Training on all {len(df_train):,} candidate pairs.", flush=True)
+        else:
+            print(f"  Training on ALL {len(df_train):,} candidate pairs (no cap).", flush=True)
+
         model, threshold = train_model(df_train, df_gt)
+
 
         # Save checkpoint so next run skips training
         save_checkpoint(model, threshold, checkpoint_file)

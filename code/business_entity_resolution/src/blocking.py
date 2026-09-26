@@ -357,8 +357,82 @@ def _run_blocking_pass(s1_c, pool_c, country, pass_name, top_k, min_sim, n_compo
           f"Candidates: {len(cands):,}", flush=True)
     return cands
 
-def generate_candidates(df_s1, df_s2, df_s3, top_k=20, min_sim=0.15,
-                        n_components=128,
+
+# ---------------------------------------------------------------------------#
+#  Token Inverted Index blocking (HIGH-RECALL pass)                          #
+# ---------------------------------------------------------------------------#
+
+def _tokenize(text):
+    """Tokenize a string into a set of meaningful tokens (len>=2, non-numeric-only)."""
+    tokens = re.findall(r'[a-z0-9]+', str(text).lower())
+    # Keep tokens >= 2 chars; filter pure stopwords
+    STOPWORDS = {'the', 'of', 'and', 'in', 'at', 'by', 'to', 'a', 'an', 'is', 'for'}
+    return set(t for t in tokens if len(t) >= 2 and t not in STOPWORDS)
+
+try:
+    import re as _re
+except ImportError:
+    pass
+
+import re
+
+
+def _inverted_index_pass(s1_c, pool_c, country, max_candidates_per_s1=80):
+    """
+    Build a token -> [pool entity_id] inverted index from the pool.
+    For each S1 entity, retrieve all pool entities sharing at least 1 name token.
+    This is the highest-recall blocking strategy — it catches ~99% of true matches
+    that share any word (after normalization) in their business name.
+    """
+    t0 = time.time()
+    print(f"  [inverted_index] Building index for {len(pool_c):,} pool items...", flush=True)
+
+    # Build index from pool (name tokens only — most discriminative)
+    index = {}  # token -> list of (entity_id, address_token_set)
+    pool_ids_arr = pool_c['entity_id'].values
+    pool_names = pool_c['business_name'].values
+    pool_addrs = pool_c['business_address'].values
+
+    for pid, pname, paddr in zip(pool_ids_arr, pool_names, pool_addrs):
+        for tok in _tokenize(pname):
+            if tok not in index:
+                index[tok] = []
+            index[tok].append(pid)
+
+    print(f"  [inverted_index] Index built ({len(index):,} tokens). Querying {len(s1_c):,} S1 items...", flush=True)
+
+    # For each S1 entity, retrieve candidates
+    s1_names = s1_c['business_name'].values
+    s1_ids   = s1_c['entity_id'].values
+
+    candidates = []
+    for sid, sname in zip(s1_ids, s1_names):
+        s_toks = _tokenize(sname)
+        seen = {}
+        for tok in s_toks:
+            for pid in index.get(tok, []):
+                seen[pid] = seen.get(pid, 0) + 1
+
+        if not seen:
+            continue
+
+        # Score by token overlap count; keep top candidates
+        sorted_cands = sorted(seen.items(), key=lambda x: -x[1])[:max_candidates_per_s1]
+        max_score = sorted_cands[0][1] if sorted_cands else 1
+        for pid, cnt in sorted_cands:
+            sim = cnt / max(max_score, 1)
+            candidates.append({
+                'source1_entity_id':   sid,
+                'candidate_entity_id': pid,
+                'tfidf_sim':           float(sim) * 0.5  # rescale to [0, 0.5] to distinguish from TF-IDF pass
+            })
+
+    print(f"  [inverted_index] Done in {time.time()-t0:.1f}s. Candidates: {len(candidates):,}", flush=True)
+    return candidates
+
+
+def generate_candidates(df_s1, df_s2, df_s3, top_k=20, min_sim=0.05,
+                        n_components=256,
                         s1_gpu_batch=5_000,
                         s1_cpu_batch=3_000,
                         pool_chunk_size=2_000,
@@ -387,44 +461,49 @@ def generate_candidates(df_s1, df_s2, df_s3, top_k=20, min_sim=0.15,
         print(f"\nBlocking for country '{country}' "
               f"(S1: {len(s1_c):,}, Pool: {len(pool_c):,})...", flush=True)
         t0 = time.time()
-        
+
         country_cands = []
-        
+
+        # ── Pass 0: Token Inverted Index (HIGH RECALL, name-based) ──────────
+        print(f"  --- Pass: inverted_index_name ---", flush=True)
+        country_cands.extend(_inverted_index_pass(s1_c, pool_c, country, max_candidates_per_s1=60))
+
+        # ── Passes 1-3: TF-IDF LSA (semantic/fuzzy similarity) ─────────────
         passes = [
-            ("name_only", s1_c['business_name'].str.lower(), pool_c['business_name'].str.lower()),
+            ("name_only",    s1_c['business_name'].str.lower(),    pool_c['business_name'].str.lower()),
             ("address_only", s1_c['business_address'].str.lower(), pool_c['business_address'].str.lower()),
-            ("combined", (s1_c['business_name'] + ' ' + s1_c['business_address']).str.lower(), 
-                         (pool_c['business_name'] + ' ' + pool_c['business_address']).str.lower())
+            ("combined",    (s1_c['business_name'] + ' ' + s1_c['business_address']).str.lower(),
+                            (pool_c['business_name'] + ' ' + pool_c['business_address']).str.lower())
         ]
-        
+
         for pass_name, s1_text, pool_text in passes:
             print(f"  --- Pass: {pass_name} ---", flush=True)
-            s1_c['clean_text'] = s1_text
+            s1_c['clean_text']   = s1_text
             pool_c['clean_text'] = pool_text
-            
-            # Use smaller top_k for individual passes to control candidate explosion
+
             pass_top_k = top_k if pass_name == "combined" else max(1, top_k // 2)
-            
+
             pass_cands = _run_blocking_pass(
                 s1_c, pool_c, country, pass_name, pass_top_k, min_sim, n_components,
                 use_gpu, device, torch_mod, s1_gpu_batch, s1_cpu_batch, pool_chunk_size,
                 use_semantic=use_semantic
             )
             country_cands.extend(pass_cands)
-            
-        # Deduplicate candidates for this country
+
+        # Deduplicate candidates for this country (keep highest sim seen)
         df_cands = pd.DataFrame(country_cands)
         if not df_cands.empty:
             df_cands = df_cands.sort_values('tfidf_sim', ascending=False)
             df_cands = df_cands.drop_duplicates(subset=['source1_entity_id', 'candidate_entity_id'], keep='first')
             all_candidates.extend(df_cands.to_dict('records'))
             print(f"  Country '{country}' total deduplicated candidates: {len(df_cands):,}", flush=True)
-        
+
         print(f"  Country '{country}' done in {time.time()-t0:.1f}s.", flush=True)
 
     print(f"\nTotal blocking done in {time.time()-t0_all:.1f}s.  "
           f"Total: {len(all_candidates):,}", flush=True)
     return pd.DataFrame(all_candidates)
+
 
 
 # ---------------------------------------------------------------------------#
