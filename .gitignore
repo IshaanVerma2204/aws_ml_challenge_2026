@@ -25,8 +25,10 @@ dataset/**/*.tsv
 dataset/train/
 dataset/test/
 
-# Output — ignore generated TSV predictions but keep the placeholder README
+# Output — ignore generated TSV predictions, feather caches, checkpoints
 output/*.tsv
+output/*.feather
+*.feather
 
 # Jupyter Notebooks checkpoints
 .ipynb_checkpoints/
