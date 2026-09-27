@@ -161,7 +161,7 @@ def train_model(df_features, df_gt):
     
     best_threshold = 0.50
     best_macro_f05 = 0.0
-    unique_s1 = set(groups)
+    unique_s1 = set(df_gt['source1_entity_id'].values)
     
     for th in np.arange(0.30, 0.90, 0.02):
         th = round(th, 2)
