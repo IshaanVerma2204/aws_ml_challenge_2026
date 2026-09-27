@@ -63,18 +63,29 @@ def prepare_training_data(df_features, df_gt):
 from sklearn.model_selection import GroupKFold
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestClassifier, HistGradientBoostingClassifier
+import lightgbm as lgb
+from catboost import CatBoostClassifier
 
 class EnsembleModel:
-    def __init__(self, xgb_model, lr_model, scaler):
+    def __init__(self, xgb_model, lr_model, rf_model, hgb_model, lgb_model, cb_model, scaler):
         self.xgb_model = xgb_model
         self.lr_model = lr_model
+        self.rf_model = rf_model
+        self.hgb_model = hgb_model
+        self.lgb_model = lgb_model
+        self.cb_model = cb_model
         self.scaler = scaler
         
     def predict_proba(self, X):
         X_clean = X.fillna(0)
         xgb_p = self.xgb_model.predict_proba(X_clean)[:, 1]
+        rf_p = self.rf_model.predict_proba(X_clean)[:, 1]
+        hgb_p = self.hgb_model.predict_proba(X_clean)[:, 1]
+        lgb_p = self.lgb_model.predict_proba(X_clean)[:, 1]
+        cb_p = self.cb_model.predict_proba(X_clean)[:, 1]
         lr_p = self.lr_model.predict_proba(self.scaler.transform(X_clean))[:, 1]
-        ens = 0.8 * xgb_p + 0.2 * lr_p
+        ens = 0.3 * xgb_p + 0.2 * lgb_p + 0.2 * cb_p + 0.1 * hgb_p + 0.1 * rf_p + 0.1 * lr_p
         res = np.zeros((len(X), 2))
         res[:, 1] = ens
         return res
@@ -117,6 +128,22 @@ def train_model(df_features, df_gt):
         xgb_m.fit(X_train, y_train)
         xgb_p = xgb_m.predict_proba(X_val)[:, 1]
         
+        rf_m = RandomForestClassifier(n_estimators=150, max_depth=12, class_weight='balanced', random_state=42, n_jobs=-1)
+        rf_m.fit(X_train, y_train)
+        rf_p = rf_m.predict_proba(X_val)[:, 1]
+        
+        hgb_m = HistGradientBoostingClassifier(max_iter=300, max_depth=6, learning_rate=0.05, random_state=42)
+        hgb_m.fit(X_train, y_train)
+        hgb_p = hgb_m.predict_proba(X_val)[:, 1]
+        
+        lgb_m = lgb.LGBMClassifier(n_estimators=300, max_depth=6, learning_rate=0.05, random_state=42, n_jobs=-1)
+        lgb_m.fit(X_train, y_train)
+        lgb_p = lgb_m.predict_proba(X_val)[:, 1]
+        
+        cb_m = CatBoostClassifier(iterations=300, depth=6, learning_rate=0.05, random_state=42, verbose=0)
+        cb_m.fit(X_train, y_train)
+        cb_p = cb_m.predict_proba(X_val)[:, 1]
+        
         scaler = StandardScaler()
         X_train_s = scaler.fit_transform(X_train)
         X_val_s = scaler.transform(X_val)
@@ -125,7 +152,7 @@ def train_model(df_features, df_gt):
         lr_m.fit(X_train_s, y_train)
         lr_p = lr_m.predict_proba(X_val_s)[:, 1]
         
-        oof_preds[val_idx] = 0.8 * xgb_p + 0.2 * lr_p
+        oof_preds[val_idx] = 0.3 * xgb_p + 0.2 * lgb_p + 0.2 * cb_p + 0.1 * hgb_p + 0.1 * rf_p + 0.1 * lr_p
         
     print(f"CV completed in {time.time()-t_cv:.1f}s. Sweeping threshold for Macro F0.5...", flush=True)
     
@@ -155,18 +182,30 @@ def train_model(df_features, df_gt):
     print(f"  Identified {sum(hard_neg_mask):,} hard negatives from OOF.", flush=True)
     
     final_xgb = xgb.XGBClassifier(
-        n_estimators=400, max_depth=6, learning_rate=0.05,
+        n_estimators=600, max_depth=7, learning_rate=0.03,
         subsample=0.8, colsample_bytree=0.8, scale_pos_weight=pos_weight,
         eval_metric='logloss', tree_method='hist', random_state=42
     )
     final_xgb.fit(X, y, sample_weight=sample_weights)
     
+    final_rf = RandomForestClassifier(n_estimators=200, max_depth=15, class_weight='balanced', random_state=42, n_jobs=-1)
+    final_rf.fit(X, y, sample_weight=sample_weights)
+
+    final_hgb = HistGradientBoostingClassifier(max_iter=400, max_depth=7, learning_rate=0.03, random_state=42)
+    final_hgb.fit(X, y, sample_weight=sample_weights)
+    
+    final_lgb = lgb.LGBMClassifier(n_estimators=600, max_depth=7, learning_rate=0.03, random_state=42, n_jobs=-1)
+    final_lgb.fit(X, y, sample_weight=sample_weights)
+    
+    final_cb = CatBoostClassifier(iterations=600, depth=7, learning_rate=0.03, random_state=42, verbose=0)
+    final_cb.fit(X, y, sample_weight=sample_weights)
+    
     final_scaler = StandardScaler()
     X_s = final_scaler.fit_transform(X)
-    final_lr = LogisticRegression(class_weight='balanced', max_iter=1000, random_state=42)
+    final_lr = LogisticRegression(class_weight='balanced', max_iter=2000, random_state=42)
     final_lr.fit(X_s, y, sample_weight=sample_weights)
     
-    final_model = EnsembleModel(final_xgb, final_lr, final_scaler)
+    final_model = EnsembleModel(final_xgb, final_lr, final_rf, final_hgb, final_lgb, final_cb, final_scaler)
     return final_model, best_threshold
 
 def predict_matches(model, df_features, threshold):

@@ -132,11 +132,17 @@ def main():
                     if m:
                         gt_pairs_list.append({'source1_entity_id': s1, 'candidate_entity_id': m, 'tfidf_sim': 1.0})
         
+        train_sample_size = 5_000_000
+        if len(df_cand_train) > train_sample_size:
+            print(f"    Downsampling train candidates from {len(df_cand_train):,} to {train_sample_size:,} to prevent MemoryError...", flush=True)
+            df_cand_train = df_cand_train.sample(n=train_sample_size, random_state=42)
+
         df_gt_flat = pd.DataFrame(gt_pairs_list)
         if not df_gt_flat.empty:
             df_cand_train = pd.concat([df_cand_train, df_gt_flat], ignore_index=True)
             df_cand_train = df_cand_train.drop_duplicates(subset=['source1_entity_id', 'candidate_entity_id'])
         print(f"    Total candidates after GT injection: {len(df_cand_train):,}", flush=True)
+
 
         # 3. Features (Train)
         print("\n--- STAGE 3: FEATURE ENGINEERING (TRAIN) ---", flush=True)

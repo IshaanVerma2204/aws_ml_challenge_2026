@@ -1,8 +1,8 @@
 {
-    "timestamp": 1790403636.8278372,
+    "timestamp": 1790453655.5902843,
     "args": {
-        "data_dir": "c:\\Users\\aashi\\Desktop\\AWSchallenge\\dataset",
-        "output_dir": "c:\\Users\\aashi\\Desktop\\AWSchallenge\\output",
+        "data_dir": "dataset",
+        "output_dir": "output",
         "top_k": null,
         "min_sim": null,
         "train_sample_size": null,
@@ -12,25 +12,25 @@
     },
     "config": {
         "blocking": {
-            "top_k": 20,
-            "min_sim": 0.15,
+            "top_k": 30,
+            "min_sim": 0.1,
             "n_components": 128,
-            "use_semantic": false
+            "use_semantic": true
         },
         "model": {
-            "xgb_n_estimators": 400,
-            "xgb_max_depth": 6,
-            "xgb_learning_rate": 0.05,
-            "lr_max_iter": 1000
+            "xgb_n_estimators": 600,
+            "xgb_max_depth": 7,
+            "xgb_learning_rate": 0.03,
+            "lr_max_iter": 2000
         },
         "pipeline": {
-            "train_sample_size": 50000,
+            "train_sample_size": 100000,
             "streaming_chunk_size": 500000
         }
     },
     "metrics": {
-        "total_time_seconds": 4261.994589805603,
+        "total_time_seconds": 28935.050802469254,
         "test_matches_predicted": 1732544,
-        "optimal_threshold": 0.86
+        "optimal_threshold": 0.68
     }
 }

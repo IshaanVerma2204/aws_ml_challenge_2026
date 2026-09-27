@@ -120,7 +120,9 @@ def _topk_search_gpu(s1_lsa, pool_lsa, top_k, min_sim, s1_gpu_batch,
     print(f"  [{country}] GPU search (FP16): {n_batches:,} S1 batches (size {batch_size}) x {n_pool:,} pool "
           f"(pool: {pool_vram_gb:.2f} GB VRAM, sim buffer: {sim_batch_mb:.0f} MB)", flush=True)
 
-    candidates = []
+    cand_s1_list = []
+    cand_pool_list = []
+    cand_sims_list = []
     t0 = time.time()
     last_print = t0
     actual_k = min(top_k, n_pool)
@@ -149,12 +151,9 @@ def _topk_search_gpu(s1_lsa, pool_lsa, top_k, min_sim, s1_gpu_batch,
             cand_pool = pool_ids[top_idx_np[valid_rows, valid_cols]]
             cand_sims = top_vals_np[valid_rows, valid_cols]
 
-            for sid, pid, sm in zip(cand_s1, cand_pool, cand_sims):
-                candidates.append({
-                    'source1_entity_id':   sid,
-                    'candidate_entity_id': pid,
-                    'tfidf_sim':           float(sm)
-                })
+            cand_s1_list.extend(cand_s1.tolist())
+            cand_pool_list.extend(cand_pool.tolist())
+            cand_sims_list.extend(cand_sims.tolist())
 
         now = time.time()
         if (now - last_print >= 10.0) or (s1_end == n_s1):
@@ -162,12 +161,17 @@ def _topk_search_gpu(s1_lsa, pool_lsa, top_k, min_sim, s1_gpu_batch,
             rate    = s1_end / max(elapsed, 1e-3)
             eta_sec = (n_s1 - s1_end) / max(rate, 1e-3)
             print(f"  [{country}] S1 {s1_end:,}/{n_s1:,} ({100*s1_end/n_s1:.1f}%) "
-                  f"| {rate:.0f} S1/s | ETA: {eta_sec:.0f}s | candidates: {len(candidates):,}", flush=True)
+                  f"| {rate:.0f} S1/s | ETA: {eta_sec:.0f}s | candidates: {len(cand_s1_list):,}", flush=True)
             last_print = now
 
     del pool_gpu, s1_gpu
     torch.cuda.empty_cache()
-    return candidates
+    
+    return pd.DataFrame({
+        'source1_entity_id': cand_s1_list,
+        'candidate_entity_id': cand_pool_list,
+        'tfidf_sim': cand_sims_list
+    })
 
 def _topk_search_faiss(s1_embs, pool_embs, top_k, min_sim, country, pool_ids, s1_ids):
     """
@@ -334,7 +338,7 @@ def _run_blocking_pass(s1_c, pool_c, country, pass_name, top_k, min_sim, n_compo
             )
         else:
             pool_chunk_gpu = max(500_000, int(vram_free * 0.4 * 1e9 / (n_components * 4)))
-            cands = []
+            cands_list = []
             n_pool = len(pool_ids)
             for p_start in range(0, n_pool, pool_chunk_gpu):
                 p_end   = min(p_start + pool_chunk_gpu, n_pool)
@@ -344,7 +348,8 @@ def _run_blocking_pass(s1_c, pool_c, country, pass_name, top_k, min_sim, n_compo
                     s1_gpu_batch, device, torch_mod,
                     country, pool_ids[p_start:p_end], s1_ids
                 )
-                cands.extend(chunk_cands)
+                cands_list.append(chunk_cands)
+            cands = pd.concat(cands_list, ignore_index=True) if cands_list else pd.DataFrame()
     else:
         cands = _topk_search_cpu(
             s1_lsa, pool_lsa, top_k, min_sim,
@@ -410,21 +415,21 @@ def generate_candidates(df_s1, df_s2, df_s3, top_k=20, min_sim=0.15,
                 use_gpu, device, torch_mod, s1_gpu_batch, s1_cpu_batch, pool_chunk_size,
                 use_semantic=use_semantic
             )
-            country_cands.extend(pass_cands)
+            country_cands.append(pass_cands)
             
-        # Deduplicate candidates for this country
-        df_cands = pd.DataFrame(country_cands)
+        df_cands = pd.concat(country_cands, ignore_index=True) if country_cands else pd.DataFrame()
         if not df_cands.empty:
             df_cands = df_cands.sort_values('tfidf_sim', ascending=False)
             df_cands = df_cands.drop_duplicates(subset=['source1_entity_id', 'candidate_entity_id'], keep='first')
-            all_candidates.extend(df_cands.to_dict('records'))
+            all_candidates.append(df_cands)
             print(f"  Country '{country}' total deduplicated candidates: {len(df_cands):,}", flush=True)
         
         print(f"  Country '{country}' done in {time.time()-t0:.1f}s.", flush=True)
 
-    print(f"\nTotal blocking done in {time.time()-t0_all:.1f}s.  "
-          f"Total: {len(all_candidates):,}", flush=True)
-    return pd.DataFrame(all_candidates)
+    print(f"\nTotal blocking done in {time.time()-t0_all:.1f}s.", flush=True)
+    final_df = pd.concat(all_candidates, ignore_index=True) if all_candidates else pd.DataFrame()
+    print(f"Total: {len(final_df):,}", flush=True)
+    return final_df
 
 
 # ---------------------------------------------------------------------------#

@@ -23,7 +23,7 @@ End-to-end ML pipeline for the Business Entity Resolution Challenge. Given busin
 | **Data Ingestion & Cleaning** | ✅ Completed | Fast TSV parsing with 20x optimized regex abbreviation expansion |
 | **GPU-Accelerated Blocking** | ✅ Completed | Multi-pass LSA + PyTorch GPU cosine search + FAISS / Semantic Embedding options |
 | **High-Throughput Feature Extraction** | ✅ Completed | 15+ Features including RapidFuzz, Soundex/Metaphone Phonetics, and ZIP parsing |
-| **Model Training & Metric Tuning** | ✅ Completed | Ensemble (XGBoost + Logistic Regression) with Hard Negative Mining & Grouped-split CV |
+| **Model Training & Metric Tuning** | ✅ Completed | 6-Model Ensemble (XGBoost, CatBoost, LightGBM, RF, HistGB, LogReg) with Hard Negative Mining & Grouped-split CV |
 | **OOM Prevention & Streaming Inference** | ✅ Completed | 500k-pair chunked streaming pipeline keeping peak RAM < 500 MB |
 | **Full Test Set Execution** | ✅ Completed | Processed all 1,732,544 test Source 1 records vs ~35M candidates |
 | **Official Format Validation** | ✅ **PASSED** | Checked with `utils/validate_submission.py` — 100% compliant |
@@ -31,21 +31,21 @@ End-to-end ML pipeline for the Business Entity Resolution Challenge. Given busin
 ### Execution Summary & Metrics
 
 - **Validation Result**: `PASS: All validation checks passed successfully!`
-- **Out-of-Fold (OOF) Macro F0.5 Score**: **0.9486** 🏆
-- **Hard Negatives Mined**: 5,657 pairs identified and re-weighted
+- **Out-of-Fold (OOF) Macro F0.5 Score**: **0.9971** 🏆
+- **Hard Negatives Mined**: 15,649 pairs identified and re-weighted
 - **Total Test Source 1 Entities**: 1,732,544 records
 - **Total Valid Target Entities (S2 + S3)**: 9,969,589 records
-- **Candidate Pairs Evaluated**: 34,650,880 pairs generated across countries and multi-passes
-- **Final Matches Predicted**: 2,287,482 matched pairs (threshold optimized for Macro F0.5)
+- **Candidate Pairs Evaluated**: 134,645,063 pairs generated across countries and multi-passes
+- **Final Matches Predicted**: 5,321,984 matched pairs (threshold optimized for Macro F0.5)
 
 ---
 
 ## Model Evaluation & Performance
 
-After training the XGBoost + Logistic Regression Ensemble on the cross-validation dataset, the following charts were generated on a balanced evaluation sample of 264,000 candidate pairs (114k positive, 150k negative).
+After training the 6-Model Ensemble on the cross-validation dataset, the following charts were generated on a balanced evaluation sample of candidate pairs.
 
 ### 1. F0.5 Threshold Sweep & Precision-Recall Curve
-The model was mathematically tuned to maximize the **Macro F0.5 score** (which heavily penalizes False Positives). The optimal threshold was found to be `0.86`, yielding an OOF Macro F0.5 of **0.9486**.
+The model was mathematically tuned to maximize the **Macro F0.5 score** (which heavily penalizes False Positives). The optimal threshold was found to be `0.68`, yielding an OOF Macro F0.5 of **0.9971**.
 
 <p align="center">
   <img src="output/plots/f05_vs_threshold.png" width="48%">
@@ -60,7 +60,7 @@ The most critical features that drive the predictions are visualised below. Note
 </p>
 
 ### 3. Confusion Matrix & Class-wise Metrics
-At our strict threshold of 0.86, the model demonstrates immense precision, successfully filtering out nearly all negatives while preserving high recall on the positive pairs.
+At our strict threshold of 0.68, the model demonstrates immense precision, successfully filtering out nearly all negatives while preserving high recall on the positive pairs.
 
 <p align="center">
   <img src="output/plots/confusion_matrix.png" width="48%">

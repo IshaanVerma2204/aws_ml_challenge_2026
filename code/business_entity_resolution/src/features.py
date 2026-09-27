@@ -56,6 +56,9 @@ def compute_features(df_candidates_flat, df_s1, df_s2, df_s3):
     addr_token_sort = [fuzz.token_sort_ratio(a1, a2) / 100.0 for a1, a2 in zip(addrs1, addrs2)]
     addr_token_set = [fuzz.token_set_ratio(a1, a2) / 100.0 for a1, a2 in zip(addrs1, addrs2)]
     
+    name_jw = [jellyfish.jaro_winkler_similarity(n1, n2) for n1, n2 in zip(names1, names2)]
+    addr_jw = [jellyfish.jaro_winkler_similarity(a1, a2) for a1, a2 in zip(addrs1, addrs2)]
+    
     name_exact = [1 if n1 == n2 else 0 for n1, n2 in zip(names1, names2)]
     addr_exact = [1 if a1 == a2 else 0 for a1, a2 in zip(addrs1, addrs2)]
     
@@ -86,6 +89,8 @@ def compute_features(df_candidates_flat, df_s1, df_s2, df_s3):
         'addr_partial': addr_partial,
         'addr_token_sort': addr_token_sort,
         'addr_token_set': addr_token_set,
+        'name_jw': name_jw,
+        'addr_jw': addr_jw,
         'name_exact': name_exact,
         'addr_exact': addr_exact,
         'name_len_diff': name_len_diff,
@@ -123,7 +128,7 @@ def predict_matches_streamed(model, df_candidates_flat, df_s1, df_s2, df_s3, thr
     feature_cols = [
         'tfidf_sim', 'name_ratio', 'name_partial', 'name_token_sort',
         'name_token_set', 'name_wratio', 'addr_ratio', 'addr_partial',
-        'addr_token_sort', 'addr_token_set', 'name_exact', 'addr_exact',
+        'addr_token_sort', 'addr_token_set', 'name_jw', 'addr_jw', 'name_exact', 'addr_exact',
         'name_len_diff', 'addr_len_diff', 
         'name_soundex_match', 'name_meta_match', 'addr_num_overlap', 'addr_zip_match',
         'cand_source'
@@ -156,6 +161,8 @@ def predict_matches_streamed(model, df_candidates_flat, df_s1, df_s2, df_s3, thr
             'addr_partial': np.array([fuzz.partial_ratio(a1, a2) / 100.0 for a1, a2 in zip(addrs1, addrs2)], dtype=np.float32),
             'addr_token_sort': np.array([fuzz.token_sort_ratio(a1, a2) / 100.0 for a1, a2 in zip(addrs1, addrs2)], dtype=np.float32),
             'addr_token_set': np.array([fuzz.token_set_ratio(a1, a2) / 100.0 for a1, a2 in zip(addrs1, addrs2)], dtype=np.float32),
+            'name_jw': np.array([jellyfish.jaro_winkler_similarity(n1, n2) for n1, n2 in zip(names1, names2)], dtype=np.float32),
+            'addr_jw': np.array([jellyfish.jaro_winkler_similarity(a1, a2) for a1, a2 in zip(addrs1, addrs2)], dtype=np.float32),
             'name_exact': np.array([1 if n1 == n2 else 0 for n1, n2 in zip(names1, names2)], dtype=np.int8),
             'addr_exact': np.array([1 if a1 == a2 else 0 for a1, a2 in zip(addrs1, addrs2)], dtype=np.int8),
             'name_len_diff': np.array([abs(len(n1) - len(n2)) for n1, n2 in zip(names1, names2)], dtype=np.int16),
